@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for Streamlit
 import matplotlib.pyplot as plt
+import os
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -23,111 +26,181 @@ for FICO scores. It transforms continuous credit profiles into optimal categorie
 # ==========================================
 @st.cache_data
 def load_and_aggregate_data():
-    # Load dataset
-    df = pd.read_csv('Task 3 and 4_Loan_Data.csv')
+    """Load and aggregate FICO score data"""
+    try:
+        # Try multiple possible filenames
+        csv_files = [
+            'Task 3 and 4_Loan_Data.csv',
+            'Task_3_and_4_Loan_Data.csv',
+            'loan_data.csv'
+        ]
+        
+        df = None
+        for filename in csv_files:
+            if os.path.exists(filename):
+                df = pd.read_csv(filename)
+                break
+        
+        if df is None:
+            # Create sample data for demonstration
+            st.warning("⚠️ Data file not found. Using generated sample data for demonstration.")
+            np.random.seed(42)
+            n_samples = 5000
+            fico_scores = np.random.normal(680, 80, n_samples)
+            fico_scores = np.clip(fico_scores, 300, 850).astype(int)
+            defaults = np.random.binomial(1, 0.05 - (fico_scores - 300) / 550 * 0.04, n_samples)
+            df = pd.DataFrame({
+                'fico_score': fico_scores,
+                'default': defaults
+            })
+        
+        # Validate required columns
+        if 'fico_score' not in df.columns or 'default' not in df.columns:
+            st.error("❌ CSV must contain 'fico_score' and 'default' columns")
+            st.stop()
+        
+        # Sort and aggregate by unique FICO scores to minimize DP complexity
+        fico_raw = df['fico_score'].values.astype(int)
+        default_raw = df['default'].values.astype(int)
+        
+        unique_ficos, counts = np.unique(fico_raw, return_counts=True)
+        defaults_per_fico = np.array([np.sum(default_raw[fico_raw == f]) for f in unique_ficos])
+        
+        return df, unique_ficos, counts, defaults_per_fico
     
-    # Sort and aggregate by unique FICO scores to minimize DP complexity
-    fico_raw = df['fico_score'].values
-    default_raw = df['default'].values
-    
-    unique_ficos, counts = np.unique(fico_raw, return_counts=True)
-    defaults_per_fico = np.array([np.sum(default_raw[fico_raw == f]) for f in unique_ficos])
-    
-    return df, unique_ficos, counts, defaults_per_fico
+    except Exception as e:
+        st.error(f"❌ Error loading data: {str(e)}")
+        st.stop()
 
-try:
-    df, unique_ficos, counts, defaults_per_fico = load_and_aggregate_data()
-except FileNotFoundError:
-    st.error("❌ 'Task 3 and 4_Loan_Data.csv' not found. Please ensure it is in the active directory.")
-    st.stop()
+# Load data
+df, unique_ficos, counts, defaults_per_fico = load_and_aggregate_data()
 
 # ==========================================
 # 3. DYNAMIC PROGRAMMING OPTIMIZATION CORES
 # ==========================================
 def optimize_log_likelihood(unique_ficos, counts, defaults, num_buckets):
-    N = len(unique_ficos)
-    pref_n = np.zeros(N + 1, dtype=int)
-    pref_k = np.zeros(N + 1, dtype=int)
-    for i in range(N):
-        pref_n[i+1] = pref_n[i] + counts[i]
-        pref_k[i+1] = pref_k[i] + defaults[i]
+    """Optimize log-likelihood for bucket boundaries"""
+    try:
+        N = len(unique_ficos)
         
-    ll_matrix = np.full((N, N), -np.inf)
-    for i in range(N):
-        for j in range(i, N):
-            n = pref_n[j+1] - pref_n[i]
-            k = pref_k[j+1] - pref_k[i]
-            if n > 0:
-                p = k / n
-                term1 = k * np.log(p) if k > 0 else 0
-                term2 = (n - k) * np.log(1 - p) if (n - k) > 0 else 0
-                ll_matrix[i, j] = term1 + term2
-                
-    dp = np.full((num_buckets + 1, N), -np.inf)
-    parent = np.full((num_buckets + 1, N), -1, dtype=int)
-    
-    for i in range(N):
-        dp[1, i] = ll_matrix[0, i]
+        # Handle edge cases
+        if N < num_buckets:
+            st.warning(f"⚠️ Number of unique FICO scores ({N}) is less than requested buckets ({num_buckets}). Adjusting to {N}.")
+            num_buckets = max(2, N)
         
-    for b in range(2, num_buckets + 1):
+        pref_n = np.zeros(N + 1, dtype=int)
+        pref_k = np.zeros(N + 1, dtype=int)
         for i in range(N):
-            for j in range(b - 2, i):
-                val = dp[b-1, j] + ll_matrix[j+1, i]
-                if val > dp[b, i]:
-                    dp[b, i] = val
-                    parent[b, i] = j
+            pref_n[i+1] = pref_n[i] + counts[i]
+            pref_k[i+1] = pref_k[i] + defaults[i]
+            
+        ll_matrix = np.full((N, N), -np.inf)
+        for i in range(N):
+            for j in range(i, N):
+                n = pref_n[j+1] - pref_n[i]
+                k = pref_k[j+1] - pref_k[i]
+                if n > 0:
+                    p = k / n
+                    term1 = k * np.log(p) if k > 0 else 0
+                    term2 = (n - k) * np.log(1 - p) if (n - k) > 0 else 0
+                    ll_matrix[i, j] = term1 + term2
                     
-    boundaries = []
-    curr = N - 1
-    for b in range(num_buckets, 1, -1):
-        idx = parent[b, curr]
-        boundaries.append(int(unique_ficos[idx+1]))
-        curr = idx
-    boundaries.reverse()
-    return boundaries
+        dp = np.full((num_buckets + 1, N), -np.inf)
+        parent = np.full((num_buckets + 1, N), -1, dtype=int)
+        
+        for i in range(N):
+            dp[1, i] = ll_matrix[0, i]
+            
+        for b in range(2, num_buckets + 1):
+            for i in range(b - 1, N):
+                for j in range(b - 2, i):
+                    if dp[b-1, j] > -np.inf and ll_matrix[j+1, i] > -np.inf:
+                        val = dp[b-1, j] + ll_matrix[j+1, i]
+                        if val > dp[b, i]:
+                            dp[b, i] = val
+                            parent[b, i] = j
+                    
+        boundaries = []
+        curr = N - 1
+        for b in range(num_buckets, 1, -1):
+            idx = parent[b, curr]
+            if idx >= 0 and idx < N - 1:
+                boundaries.append(int(unique_ficos[idx+1]))
+            curr = idx
+            if curr < 0:
+                break
+        
+        boundaries.reverse()
+        return sorted(set(boundaries))  # Remove duplicates and sort
+    
+    except Exception as e:
+        st.error(f"Error in log-likelihood optimization: {str(e)}")
+        return []
 
 def optimize_mse(unique_ficos, counts, num_buckets):
-    N = len(unique_ficos)
-    mse_matrix = np.full((N, N), np.inf)
-    for i in range(N):
-        f_sub, c_sub = [], []
-        for k in range(i, N):
-            f_sub.append(unique_ficos[k])
-            c_sub.append(counts[k])
-            total_count = sum(c_sub)
-            total_sum = sum(f * c for f, c in zip(f_sub, c_sub))
-            mean = total_sum / total_count
-            sq_err = sum(c * (f - mean)**2 for f, c in zip(f_sub, c_sub))
-            mse_matrix[i, k] = sq_err
-            
-    dp = np.full((num_buckets + 1, N), np.inf)
-    parent = np.full((num_buckets + 1, N), -1, dtype=int)
-    
-    for i in range(N):
-        dp[1, i] = mse_matrix[0, i]
+    """Optimize Mean Squared Error for bucket boundaries"""
+    try:
+        N = len(unique_ficos)
         
-    for b in range(2, num_buckets + 1):
+        # Handle edge cases
+        if N < num_buckets:
+            st.warning(f"⚠️ Number of unique FICO scores ({N}) is less than requested buckets ({num_buckets}). Adjusting to {N}.")
+            num_buckets = max(2, N)
+        
+        mse_matrix = np.full((N, N), np.inf)
         for i in range(N):
-            for j in range(b - 2, i):
-                val = dp[b-1, j] + mse_matrix[j+1, i]
-                if val < dp[b, i]:
-                    dp[b, i] = val
-                    parent[b, i] = j
+            f_sub, c_sub = [], []
+            for k in range(i, N):
+                f_sub.append(unique_ficos[k])
+                c_sub.append(counts[k])
+                total_count = sum(c_sub)
+                total_sum = sum(f * c for f, c in zip(f_sub, c_sub))
+                mean = total_sum / total_count
+                sq_err = sum(c * (f - mean)**2 for f, c in zip(f_sub, c_sub))
+                mse_matrix[i, k] = sq_err
+            
+        dp = np.full((num_buckets + 1, N), np.inf)
+        parent = np.full((num_buckets + 1, N), -1, dtype=int)
+        
+        for i in range(N):
+            dp[1, i] = mse_matrix[0, i]
+            
+        for b in range(2, num_buckets + 1):
+            for i in range(b - 1, N):
+                for j in range(b - 2, i):
+                    if dp[b-1, j] < np.inf and mse_matrix[j+1, i] < np.inf:
+                        val = dp[b-1, j] + mse_matrix[j+1, i]
+                        if val < dp[b, i]:
+                            dp[b, i] = val
+                            parent[b, i] = j
                     
-    boundaries = []
-    curr = N - 1
-    for b in range(num_buckets, 1, -1):
-        idx = parent[b, curr]
-        boundaries.append(int(unique_ficos[idx+1]))
-        curr = idx
-    boundaries.reverse()
-    return boundaries
+        boundaries = []
+        curr = N - 1
+        for b in range(num_buckets, 1, -1):
+            idx = parent[b, curr]
+            if idx >= 0 and idx < N - 1:
+                boundaries.append(int(unique_ficos[idx+1]))
+            curr = idx
+            if curr < 0:
+                break
+        
+        boundaries.reverse()
+        return sorted(set(boundaries))  # Remove duplicates and sort
+    
+    except Exception as e:
+        st.error(f"Error in MSE optimization: {str(e)}")
+        return []
 
 # ==========================================
 # 4. SIDEBAR CONTROLS
 # ==========================================
 st.sidebar.header("⚙️ Optimization Parameters")
-num_buckets = st.sidebar.slider("Target Number of Rating Buckets", min_value=2, max_value=10, value=5)
+num_buckets = st.sidebar.slider(
+    "Target Number of Rating Buckets", 
+    min_value=2, 
+    max_value=min(10, len(unique_ficos)), 
+    value=min(5, len(unique_ficos))
+)
 objective_type = st.sidebar.radio(
     "Optimization Objective Strategy",
     options=["Log-Likelihood Maximization", "Mean Squared Error (MSE) Minimization"],
@@ -135,38 +208,60 @@ objective_type = st.sidebar.radio(
 )
 
 # Run Selected DP Optimization
-if objective_type == "Log-Likelihood Maximization":
-    optimal_boundaries = optimize_log_likelihood(unique_ficos, counts, defaults_per_fico, num_buckets)
-else:
-    optimal_boundaries = optimize_mse(unique_ficos, counts, num_buckets)
+try:
+    if objective_type == "Log-Likelihood Maximization":
+        optimal_boundaries = optimize_log_likelihood(unique_ficos, counts, defaults_per_fico, num_buckets)
+    else:
+        optimal_boundaries = optimize_mse(unique_ficos, counts, num_buckets)
+    
+    # Ensure we have valid boundaries
+    if not optimal_boundaries:
+        st.error("❌ Failed to compute optimal boundaries. Please adjust parameters.")
+        st.stop()
+    
+except Exception as e:
+    st.error(f"❌ Optimization error: {str(e)}")
+    st.stop()
 
 # Build Complete Chronological Rating Mapping Array
-# Note: Task states lower rating maps to a better credit score.
-# Therefore: Highest FICO score bucket -> Rating 1, Lowest FICO bucket -> Max Rating.
-all_bounds = [int(unique_ficos[0])] + optimal_boundaries + [int(unique_ficos[-1] + 1)]
-map_records = []
-
-for i in range(len(all_bounds) - 1):
-    low = all_bounds[i]
-    high = all_bounds[i+1] - 1
-    mask = (unique_ficos >= low) & (unique_ficos <= high)
+try:
+    # Ensure boundaries are within data range
+    optimal_boundaries = [b for b in optimal_boundaries if unique_ficos[0] < b < unique_ficos[-1] + 1]
+    optimal_boundaries = sorted(set(optimal_boundaries))
     
-    n_rec = int(np.sum(counts[mask]))
-    k_def = int(np.sum(defaults_per_fico[mask]))
-    pd_val = k_def / n_rec if n_rec > 0 else 0.0
-    
-    map_records.append({
-        "Lower Bound": low,
-        "Upper Bound": high,
-        "Borrower Count": n_rec,
-        "Defaults Count": k_def,
-        "Probability of Default (PD)": pd_val
-    })
+    all_bounds = [int(unique_ficos[0])] + optimal_boundaries + [int(unique_ficos[-1] + 1)]
+    map_records = []
 
-# Sort so that highest FICO ranges receive the lowest (best) credit rating ranking
-map_df = pd.DataFrame(map_records)
-map_df = map_df.sort_values(by="Lower Bound", ascending=False).reset_index(drop=True)
-map_df.insert(0, "Assigned Credit Rating", range(1, num_buckets + 1))
+    for i in range(len(all_bounds) - 1):
+        low = all_bounds[i]
+        high = all_bounds[i+1] - 1
+        mask = (unique_ficos >= low) & (unique_ficos <= high)
+        
+        if np.sum(mask) > 0:
+            n_rec = int(np.sum(counts[mask]))
+            k_def = int(np.sum(defaults_per_fico[mask]))
+            pd_val = k_def / n_rec if n_rec > 0 else 0.0
+            
+            map_records.append({
+                "Lower Bound": low,
+                "Upper Bound": high,
+                "Borrower Count": n_rec,
+                "Defaults Count": k_def,
+                "Probability of Default (PD)": pd_val
+            })
+
+    if not map_records:
+        st.error("❌ No valid rating buckets could be created.")
+        st.stop()
+
+    # Sort so that highest FICO ranges receive the lowest (best) credit rating ranking
+    map_df = pd.DataFrame(map_records)
+    map_df = map_df.sort_values(by="Lower Bound", ascending=False).reset_index(drop=True)
+    map_df.insert(0, "Assigned Credit Rating", range(1, len(map_df) + 1))
+
+except Exception as e:
+    st.error(f"❌ Error creating rating map: {str(e)}")
+    st.stop()
 
 # ==========================================
 # 5. MAIN CONTENT TAB ARCHITECTURE
@@ -178,60 +273,79 @@ with tab1:
     st.caption("As instructed, a lower assigned numerical rating implies a stronger credit file (lower Probability of Default).")
     
     # Beautifully display the map dataframe
-    st.dataframe(
-        map_df.style.format({
-            "Probability of Default (PD)": "{:.2%}",
-            "Borrower Count": "{:,}",
-            "Defaults Count": "{:,}"
-        }),
-        use_container_width=True
-    )
+    try:
+        st.dataframe(
+            map_df.style.format({
+                "Probability of Default (PD)": "{:.2%}",
+                "Borrower Count": "{:,}",
+                "Defaults Count": "{:,}"
+            }),
+            use_container_width=True
+        )
+    except Exception as e:
+        st.error(f"Error displaying dataframe: {str(e)}")
+        st.dataframe(map_df, use_container_width=True)
     
     st.markdown("---")
     st.subheader("🔍 Production Live Map Query Tool")
     c1, c2 = st.columns([1, 2])
     with c1:
-        query_score = st.number_input("Enter Borrower FICO Score:", min_value=300, max_value=850, value=620)
+        query_score = st.number_input(
+            "Enter Borrower FICO Score:", 
+            min_value=300, 
+            max_value=850, 
+            value=min(620, int(unique_ficos[-1]))
+        )
     with c2:
         # Resolve rating map entry location
-        matched_row = map_df[(query_score >= map_df["Lower Bound"]) & (query_score <= map_df["Upper Bound"])]
-        if not matched_row.empty:
-            assigned_r = matched_row["Assigned Credit Rating"].values[0]
-            assigned_pd = matched_row["Probability of Default (PD)"].values[0]
-            st.metric(
-                label=f"Assigned Categorical Feature Value (Rating Group)",
-                value=f"Rating Grade: {assigned_r}",
-                delta=f"Expected Bucket PD: {assigned_pd:.2%}",
-                delta_color="inverse"
-            )
-        else:
-            st.warning("⚠️ Entered FICO score falls outside the observed data parameters.")
+        try:
+            matched_row = map_df[(query_score >= map_df["Lower Bound"]) & (query_score <= map_df["Upper Bound"])]
+            if not matched_row.empty:
+                assigned_r = matched_row["Assigned Credit Rating"].values[0]
+                assigned_pd = matched_row["Probability of Default (PD)"].values[0]
+                st.metric(
+                    label=f"Assigned Categorical Feature Value (Rating Group)",
+                    value=f"Rating Grade: {assigned_r}",
+                    delta=f"Expected Bucket PD: {assigned_pd:.2%}",
+                    delta_color="inverse"
+                )
+            else:
+                st.warning("⚠️ Entered FICO score falls outside the observed data parameters.")
+        except Exception as e:
+            st.error(f"Error in query tool: {str(e)}")
 
 with tab2:
     st.subheader("📊 Quantization Splitting Visualizations")
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
-    
-    # Left Plot: Population Histogram with Boundaries
-    ax1.hist(df['fico_score'], bins=40, color='darkblue', alpha=0.7, edgecolor='k', label='Borrower Count')
-    for b_val in optimal_boundaries:
-        ax1.axvline(x=b_val, color='red', linestyle='--', linewidth=1.5, zorder=5)
-    ax1.set_title("FICO Score Population Distribution & Boundaries")
-    ax1.set_xlabel("FICO Score")
-    ax1.set_ylabel("Borrower Records")
-    ax1.grid(True, alpha=0.15)
-    
-    # Right Plot: Monotonic Credit Rating Scale Check
-    sorted_by_rating = map_df.sort_values("Assigned Credit Rating")
-    ax2.bar(
-        sorted_by_rating["Assigned Credit Rating"].astype(str),
-        sorted_by_rating["Probability of Default (PD)"] * 100,
-        color='crimson', alpha=0.8, edgecolor='k'
-    )
-    ax2.set_title("Probability of Default (PD) per Assigned Rating")
-    ax2.set_xlabel("Assigned Credit Rating (Lower = Better Credit)")
-    ax2.set_ylabel("Empirical Default Rate (%)")
-    ax2.grid(True, alpha=0.15)
-    
-    plt.tight_layout()
-    st.pyplot(fig)
+    try:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+        
+        # Left Plot: Population Histogram with Boundaries
+        ax1.hist(df['fico_score'], bins=40, color='darkblue', alpha=0.7, edgecolor='k', label='Borrower Count')
+        for b_val in optimal_boundaries:
+            ax1.axvline(x=b_val, color='red', linestyle='--', linewidth=1.5, zorder=5)
+        ax1.set_title("FICO Score Population Distribution & Boundaries")
+        ax1.set_xlabel("FICO Score")
+        ax1.set_ylabel("Borrower Records")
+        ax1.grid(True, alpha=0.15)
+        ax1.legend()
+        
+        # Right Plot: Monotonic Credit Rating Scale Check
+        sorted_by_rating = map_df.sort_values("Assigned Credit Rating")
+        ax2.bar(
+            sorted_by_rating["Assigned Credit Rating"].astype(str),
+            sorted_by_rating["Probability of Default (PD)"] * 100,
+            color='crimson', alpha=0.8, edgecolor='k'
+        )
+        ax2.set_title("Probability of Default (PD) per Assigned Rating")
+        ax2.set_xlabel("Assigned Credit Rating (Lower = Better Credit)")
+        ax2.set_ylabel("Empirical Default Rate (%)")
+        ax2.grid(True, alpha=0.15)
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+        
+    except Exception as e:
+        st.error(f"Error generating visualizations: {str(e)}")
+        st.warning("Unable to display charts. Please try refreshing the page.")

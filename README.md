@@ -69,3 +69,10 @@ graph TD
 
     J --> K[Render Interactive Scorecard Matrix & Population Graphs]
     class K success;
+```
+##  Author
+
+**Tirthabrata Das**
+
+* GitHub: https://github.com/tirthabrata0407-cloud
+* LinkedIn: https://www.linkedin.com/in/tirthabratadas2001/
